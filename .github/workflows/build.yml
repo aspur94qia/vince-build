@@ -1,0 +1,160 @@
+name: Build Vince Custom Firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  FORCE_UNSAFE_CONFIGURE: 1
+  FORK_URL: https://github.com/lkiuyu/immortalwrt
+  FORK_BRANCH: master
+  WIFI_SSID: OpenWrt-Vince
+  WIFI_KEY: ${{ secrets.WIFI_KEY || 'vince12345' }}
+  ROOT_PASS: ${{ secrets.ROOT_PASS || 'vince12345' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential ccache ecj fastjar file g++ gawk gettext git autopoint \
+          libelf-dev libdw-dev libncurses-dev libssl-dev python3 python3-distutils python3-setuptools \
+          python3-dev python3-pyelftools libpython3-dev rsync subversion swig time u-boot-tools \
+          device-tree-compiler unzip wget curl zstd flex bison ca-certificates xsltproc zlib1g-dev libffi-dev
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Clone OpenWrt Fork
+        run: |
+          rm -rf openwrt
+          git clone --depth 1 -b "$FORK_BRANCH" "$FORK_URL" openwrt
+
+      - name: Inject Fix for Elfutils Obstack Error
+        run: |
+          cd openwrt
+          [ -f tools/elfutils/Makefile ] || exit 0
+          python3 -c "
+          hook = '''
+          define Host/Configure/Pre/FixObstack
+          \tsed -i 's/#if @HAVE_OBSTACK_PRINTF@/#if 0/g' \$(HOST_BUILD_DIR)/libgnu/obstack.in.h 2>/dev/null || true
+          \tsed -i -E 's/#if[[:space:]]*\$$/#if 0/g' \$(HOST_BUILD_DIR)/libgnu/obstack.in.h 2>/dev/null || true
+          endef
+
+          define Host/Configure/Post/FixObstack
+          \tsed -i -E 's/#if[[:space:]]*\$$/#if 0/g' \$(HOST_BUILD_DIR)/libgnu/obstack.h 2>/dev/null || true
+          endef
+
+          define Host/Compile/Pre/FixObstack
+          \tsed -i -E 's/#if[[:space:]]*\$$/#if 0/g' \$(HOST_BUILD_DIR)/libgnu/obstack.h 2>/dev/null || true
+          endef
+
+          Hooks/HostConfigure/Pre += Host/Configure/Pre/FixObstack
+          Hooks/HostConfigure/Post += Host/Configure/Post/FixObstack
+          Hooks/HostCompile/Pre += Host/Compile/Pre/FixObstack
+          '''
+          with open('tools/elfutils/Makefile', 'a') as f:
+              f.write(hook)
+          "
+
+      - name: Update Feeds & Install All Requested Tools & LuCI Apps
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install libffi zlib libopenssl libubox ubus uci json-c blobmsg-json
+          ./scripts/feeds install -a -p packages
+          ./scripts/feeds install -a -p luci
+          git clone --depth 1 https://github.com/4IceG/luci-app-sms-tool-js.git package/luci-app-sms-tool-js || true
+          git clone --depth 1 https://github.com/4IceG/luci-app-modemband.git package/luci-app-modemband || true
+
+      - name: Inject Custom Files (LED, Battery Bypass, Sysctl, First-Boot Setup, TTL 64)
+        run: |
+          cd openwrt
+          mkdir -p files/usr/bin files/etc/init.d files/etc/uci-defaults files/etc/nftables.d files/etc/sysctl.d
+          cp -r ../files/* files/
+
+      - name: Inject Full Configuration Target MSM89xx with All Tools
+        run: |
+          cd openwrt
+          cat << 'CONFIG_EOF' > .config
+          CONFIG_TARGET_msm89xx=y
+          CONFIG_TARGET_ALL_PROFILES=y
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_kmod-wcn36xx=y
+          CONFIG_PACKAGE_hostapd=y
+          CONFIG_PACKAGE_kmod-tcp-bbr=y
+          CONFIG_PACKAGE_sqm-scripts=y
+          CONFIG_PACKAGE_luci-app-sqm=y
+          CONFIG_PACKAGE_luci-app-travelmate=y
+          CONFIG_PACKAGE_relayd=y
+          CONFIG_PACKAGE_luci-proto-relay=y
+          CONFIG_PACKAGE_modemmanager=y
+          CONFIG_PACKAGE_luci-proto-modemmanager=y
+          CONFIG_PACKAGE_qmi-utils=y
+          CONFIG_PACKAGE_mbim-utils=y
+          CONFIG_PACKAGE_sms-tool=y
+          CONFIG_PACKAGE_luci-app-modemband=y
+          CONFIG_PACKAGE_luci-app-sms-tool-js=y
+          CONFIG_PACKAGE_usb-modeswitch=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+          CONFIG_PACKAGE_kmod-usb-net-rndis=y
+          CONFIG_PACKAGE_kmod-usb-serial-option=y
+          CONFIG_PACKAGE_kmod-usb-serial-qualcomm=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-f2fs=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+          CONFIG_PACKAGE_mwan3=y
+          CONFIG_PACKAGE_luci-app-mwan3=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_luci-proto-wireguard=y
+          CONFIG_PACKAGE_zerotier=y
+          CONFIG_PACKAGE_luci-app-zerotier=y
+          CONFIG_PACKAGE_zram-swap=y
+          CONFIG_PACKAGE_aria2=y
+          CONFIG_PACKAGE_luci-app-aria2=y
+          CONFIG_PACKAGE_luci-app-statistics=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_libffi=y
+          CONFIG_PACKAGE_glib2=y
+          CONFIG_PACKAGE_glib2-gobject=y
+          CONFIG_EOF
+          make defconfig
+
+      - name: Download Sources
+        run: |
+          cd openwrt
+          sed -i 's/wget -t/wget --user-agent="Mozilla\/5.0" -t/g' scripts/download.pl 2>/dev/null || true
+          make download -j8 WGET="wget --user-agent='Mozilla/5.0'" V=s || make download -j1 WGET="wget --user-agent='Mozilla/5.0'" V=s || true
+
+      - name: Compile Firmware
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s || make -j1 V=s
+
+      - name: Collect & Package Images
+        run: |
+          cd openwrt
+          mkdir -p $GITHUB_WORKSPACE/flash-out
+          find bin/targets/ -type f \( -name "*.img" -o -name "*.bin" -o -name "*.gz" \) -exec cp -v {} $GITHUB_WORKSPACE/flash-out/ \;
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-vince-firmware
+          path: flash-out/
